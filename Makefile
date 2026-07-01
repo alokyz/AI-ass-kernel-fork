@@ -1,9 +1,9 @@
-CC      = i686-elf-gcc
+CC      = /home/alokyz/i686-elf-tools/bin/i686-elf-gcc
 AS      = nasm
-LD      = i686-elf-ld
-OBJCOPY = i686-elf-objcopy
-PYTHON  = "C:/Users/samrat/AppData/Local/Programs/Python/Python312/python.exe"
-QEMU    = "C:/Program Files/qemu/qemu-system-i386.exe"
+LD      = /home/alokyz/i686-elf-tools/bin/i686-elf-ld
+OBJCOPY = /home/alokyz/i686-elf-tools/bin/i686-elf-objcopy
+PYTHON  = python3
+QEMU    = qemu-system-i386
 
 CFLAGS  = -ffreestanding -O2 -Wall -Wextra -Werror -std=c99 \
           -nostdlib -nostdinc -fno-builtin -fno-stack-protector \

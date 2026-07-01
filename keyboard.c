@@ -2,6 +2,7 @@
 #include "port.h"
 #include "isr.h"
 #include "vga.h"
+#include "string.h"
 
 static kfifo_t kfifo;
 static int shift_down;
@@ -50,6 +51,11 @@ static void kb_callback(registers_t* r) {
 
     sc = inb(0x60);
 
+    if (sc == 0xE0) { 
+        esc_prefix = 1; 
+        return; 
+    }
+
     if (sc & 0x80) {
         uint8_t rel = sc & 0x7F;
         if (rel == 0x2A || rel == 0x36) shift_down = 0;
@@ -58,13 +64,12 @@ static void kb_callback(registers_t* r) {
 
     if (sc == 0x2A || sc == 0x36) { shift_down = 1; return; }
     if (sc == 0x3A) { caps_lock = !caps_lock; return; }
+    
     if (sc >= 128) return;
-
-    if (sc == 0xE0) { esc_prefix = 1; return; }
 
     if (esc_prefix) {
         esc_prefix = 0;
-        if (sc == 0x48) kfifo_put(&kfifo, '\x1B');
+        if (sc == 0x48)      kfifo_put(&kfifo, '\x1B');
         else if (sc == 0x50) kfifo_put(&kfifo, '\x1C');
         else if (sc == 0x4B) kfifo_put(&kfifo, '\x1D');
         else if (sc == 0x4D) kfifo_put(&kfifo, '\x1E');
@@ -113,58 +118,103 @@ static char hist[50][256];
 static int hist_count = 0;
 static int hist_pos = -1;
 
-void keyboard_wait_line(char* buf, uint32_t max) {
+void keyboard_wait_line(char* buf, uint32_t max_len) {
+    static char hist[16][128];
+    static int hist_count = 0;
+    static int hist_pos = -1; // -1 means we are on the current fresh line
+    static char current_backup[128] = ""; // Saves what you typed before hitting Up Arrow
+
     uint32_t i = 0;
     buf[0] = '\0';
-    hist_pos = -1;
 
     while (1) {
         char c = keyboard_getchar();
+
         if (c == '\n') {
             buf[i] = '\0';
-            vga_puts("\n");
-            if (i > 0 && hist_count < 50) {
-                int j;
-                for (j = 0; buf[j]; j++) hist[hist_count][j] = buf[j];
-                hist[hist_count][i] = '\0';
-                hist_count++;
+            vga_putc('\n');
+
+            // Save to history if the command isn't empty and is different from the last one
+            if (i > 0) {
+                if (hist_count == 0 || strcmp(buf, hist[(hist_count - 1) % 16]) != 0) {
+                    strncpy(hist[hist_count % 16], buf, 127);
+                    hist[hist_count % 16][127] = '\0';
+                    hist_count++;
+                }
             }
+            hist_pos = -1; // Reset history navigation
+            current_backup[0] = '\0';
             return;
         }
+
         if (c == '\b') {
-            if (i > 0) { i--; buf[i] = '\0'; vga_putc('\b'); }
-        } else if (c == '\x1B') {
-            /* Arrow Up - previous command */
+            if (i > 0) {
+                i--;
+                buf[i] = '\0';
+                vga_putc('\b');
+            }
+        } 
+        else if (c == '\x1B') { /* Arrow Up - Go backwards in time */
             if (hist_count > 0) {
-                if (hist_pos < hist_count - 1) hist_pos++;
-                int idx = hist_count - 1 - hist_pos;
-                while (i > 0) { i--; vga_putc('\b'); }
-                i = 0;
-                int j;
-                for (j = 0; hist[idx][j]; j++) { buf[i++] = hist[idx][j]; vga_putc(hist[idx][j]); }
-                buf[i] = '\0';
+                // If we are starting to look at history, backup our current edits
+                if (hist_pos == -1) {
+                    buf[i] = '\0';
+                    strncpy(current_backup, buf, 127);
+                }
+
+                int total_available = hist_count > 16 ? 16 : hist_count;
+                if (hist_pos < total_available - 1) {
+                    hist_pos++;
+                    
+                    // Clear current characters from display
+                    while (i > 0) { i--; vga_putc('\b'); }
+                    
+                    // Fetch from history slot
+                    int idx = (hist_count - 1 - hist_pos) % 16;
+                    if (idx < 0) idx += 16;
+
+                    // Copy history command into string buffer and print it
+                    for (int j = 0; hist[idx][j] && i < max_len - 1; j++) {
+                        buf[i++] = hist[idx][j];
+                        vga_putc(hist[idx][j]);
+                    }
+                    buf[i] = '\0';
+                }
             }
-        } else if (c == '\x1C') {
-            /* Arrow Down - next command */
-            if (hist_pos > 0) {
+        } 
+        else if (c == '\x1C') { /* Arrow Down - Go forwards toward modern day */
+            if (hist_pos >= 0) {
                 hist_pos--;
-                int idx = hist_count - 1 - hist_pos;
+                
+                // Clear current characters from display
                 while (i > 0) { i--; vga_putc('\b'); }
                 i = 0;
-                int j;
-                for (j = 0; hist[idx][j]; j++) { buf[i++] = hist[idx][j]; vga_putc(hist[idx][j]); }
+
+                if (hist_pos == -1) {
+                    // Restore what the user was originally typing before navigating away
+                    for (int j = 0; current_backup[j] && i < max_len - 1; j++) {
+                        buf[i++] = current_backup[j];
+                        vga_putc(current_backup[j]);
+                    }
+                } else {
+                    // Move to the next recent item in history
+                    int idx = (hist_count - 1 - hist_pos) % 16;
+                    if (idx < 0) idx += 16;
+                    for (int j = 0; hist[idx][j] && i < max_len - 1; j++) {
+                        buf[i++] = hist[idx][j];
+                        vga_putc(hist[idx][j]);
+                    }
+                }
                 buf[i] = '\0';
-            } else if (hist_pos == 0) {
-                hist_pos = -1;
-                while (i > 0) { i--; vga_putc('\b'); }
-                buf[0] = '\0';
             }
-        } else if (c == '\x1D') {
-            /* Arrow Left */
-        } else if (c == '\x1E') {
-            /* Arrow Right */
-        } else {
-            if (i < max - 1) { buf[i++] = c; buf[i] = '\0'; vga_putc(c); }
+        } 
+        else {
+            // Standard text entry
+            if (i < max_len - 1 && c >= 32 && c <= 126) {
+                buf[i++] = c;
+                buf[i] = '\0';
+                vga_putc(c);
+            }
         }
     }
 }
